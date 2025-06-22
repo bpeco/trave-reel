@@ -1,0 +1,14 @@
+openai
+moviepy
+python-dotenv
+langchain
+langchain-openai
+langchain-community
+pydantic
+typing
+yt-dlp
+googlemaps
+ortools
+fastapi
+httpx
+uvicorn

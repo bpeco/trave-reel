@@ -1,0 +1,8 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+*.pyc
+
+# Expo / Node
+mobile/travel-reel-app/node_modules/
+mobile/travel-reel-app/.expo/
