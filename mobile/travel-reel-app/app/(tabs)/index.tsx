@@ -1,718 +1,437 @@
-import React, { useState } from 'react';
+// app/(tabs)/index.tsx
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
-  TextInput,
-  TouchableOpacity,
   FlatList,
-  ActivityIndicator,
   StyleSheet,
-  Alert,
+  TouchableOpacity,
   Dimensions,
-  ScrollView,
-  Linking
+  ActivityIndicator,
+  TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { MapPin, Clock, Send, CircleAlert as AlertCircle, CircleCheck as CheckCircle, Download, Video, FileText, Sparkles } from 'lucide-react-native';
-import axios from 'axios';
+import { useRouter } from 'expo-router';
+import { supabase } from '../lib/supabase';
+import { useAuth } from '../contexts/AuthContext';
+import CountryFlag from "react-native-country-flag";
+import countries from "i18n-iso-countries";
+import es from "i18n-iso-countries/langs/es.json";
+
+countries.registerLocale(es);
 
 const { width } = Dimensions.get('window');
+const BACKEND_URL = 'http://192.168.0.18:8080';
 
-interface ItineraryItem {
-  order: number;
-  place: string;
-  duration_minutes?: number;
-  notes?: string;
+interface Trip {
+  trip_id: string;
+  name: string;
+  country: string;
+  stops_count: number;
+  created_at?: string;
 }
 
-interface ItineraryResponse {
-  ordered: ItineraryItem[];
-  route_link: string;
+function capitalize(str: string) {
+  return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
+export default function TripsScreen() {
+  const router = useRouter();
+  const { user, loading: authLoading } = useAuth();
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [profile, setProfile] = useState<{ username: string } | null>(null);
 
-interface ProgressStage {
-  id: string;
-  title: string;
-  description: string;
-  icon: React.ComponentType<any>;
-  status: 'pending' | 'active' | 'completed' | 'error';
-}
-
-export default function HomeScreen() {
-  const [url, setUrl] = useState('');
-  const [city, setCity] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [itinerary, setItinerary] = useState<ItineraryItem[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [urlError, setUrlError] = useState<string | null>(null);
-  const [cityError, setCityError] = useState<string | null>(null);
-  const [progressStages, setProgressStages] = useState<ProgressStage[]>([
-    {
-      id: 'download',
-      title: 'Descargando contenido',
-      description: 'Obteniendo el video de TikTok/Instagram',
-      icon: Download,
-      status: 'pending'
-    },
-    {
-      id: 'process',
-      title: 'Procesando video',
-      description: 'Analizando el contenido del video',
-      icon: Video,
-      status: 'pending'
-    },
-    {
-      id: 'generate',
-      title: 'Creando itinerario',
-      description: 'Generando tu plan de viaje personalizado',
-      icon: FileText,
-      status: 'pending'
-    },
-    {
-      id: 'complete',
-      title: '¡Listo!',
-      description: 'Tu itinerario está completo',
-      icon: Sparkles,
-      status: 'pending'
-    }
-  ]);
-  const [routeLink, setRouteLink] = useState<string | null>(null);
-
-
-  const validateInputs = () => {
-    let isValid = true;
-    
-    if (!url.trim()) {
-      setUrlError('URL is required');
-      isValid = false;
-    } else if (!url.includes('tiktok.com') && !url.includes('instagram.com')) {
-      setUrlError('Please enter a valid TikTok or Instagram URL');
-      isValid = false;
-    } else {
-      setUrlError(null);
-    }
-
-    if (!city.trim()) {
-      setCityError('City is required');
-      isValid = false;
-    } else {
-      setCityError(null);
-    }
-
-    return isValid;
-  };
-
-  const updateStageStatus = (stageId: string, status: 'pending' | 'active' | 'completed' | 'error') => {
-    setProgressStages(prev => prev.map(stage => 
-      stage.id === stageId ? { ...stage, status } : stage
-    ));
-  };
-
-  const resetProgressStages = () => {
-    setProgressStages(prev => prev.map(stage => ({ ...stage, status: 'pending' })));
-  };
-
-  const simulateProgressStages = async () => {
-    // Etapa 1: Descargando contenido
-    updateStageStatus('download', 'active');
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    updateStageStatus('download', 'completed');
-
-    // Etapa 2: Procesando video
-    updateStageStatus('process', 'active');
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    updateStageStatus('process', 'completed');
-
-    // Etapa 3: Creando itinerario
-    updateStageStatus('generate', 'active');
-    await new Promise(resolve => setTimeout(resolve, 2500));
-    updateStageStatus('generate', 'completed');
-
-    // Etapa 4: Completado
-    updateStageStatus('complete', 'active');
-    await new Promise(resolve => setTimeout(resolve, 500));
-    updateStageStatus('complete', 'completed');
-  };
-
-  const generateItinerary = async () => {
-    if (!validateInputs()) return;
-
+  useEffect(() => {
+    if (!user) return;
     setLoading(true);
-    setError(null);
-    setItinerary([]);
-    resetProgressStages();
-    
-    try {
-      // Ejecutar simulación de progreso en paralelo con la petición real
-      const progressPromise = simulateProgressStages();
-      
-      const response = await axios.post<ItineraryResponse>(
-        'http://192.168.1.12:8000/itinerary',
-        { url: url.trim(), city: city.trim() }
-      );
-      const { ordered, route_link } = response.data;
-      await progressPromise;
-      if (!Array.isArray(ordered)) {
-        throw new Error('Invalid response format');
-      }
-      setItinerary(ordered);
-      setRouteLink(route_link);
-    } catch (err: any) {
-      console.error('Error generating itinerary:', err);
-      const errorMessage = err.response?.data?.message || 
-                          err.message || 
-                          'Failed to generate itinerary. Please try again.';
-      setError(errorMessage);
-      
-      // Marcar todas las etapas como error
-      setProgressStages(prev => prev.map(stage => ({ ...stage, status: 'error' })));
-    } finally {
-      setLoading(false);
+    fetch(`${BACKEND_URL}/api/trips?created_by=${user.id}`)
+      .then(res => res.json())
+      .then((data: Trip[]) => setTrips(data))
+      .finally(() => setLoading(false));
+  }, [user]);
+
+  useEffect(() => {
+    // Traer el username de la tabla users
+    if (user) {
+      supabase
+        .from('users')
+        .select('username')
+        .eq('user_id', user.id)
+        .single()
+        .then(({ data }) => {
+          if (data) setProfile(data);
+        });
     }
-  };
+  }, [user]);
 
-  const renderProgressStage = ({ item, index }: { item: ProgressStage; index: number }) => {
-    const IconComponent = item.icon;
-    const isLast = index === progressStages.length - 1;
-    
-    const getStageColor = () => {
-      switch (item.status) {
-        case 'completed': return '#10B981';
-        case 'active': return '#3B82F6';
-        case 'error': return '#EF4444';
-        default: return '#D1D5DB';
-      }
-    };
+  // Resumen visual
+  const uniqueCountries = [...new Set(trips.map(t => t.country))];
+  const totalStops = trips.reduce((acc, t) => acc + t.stops_count, 0);
 
-    const getBackgroundColor = () => {
-      switch (item.status) {
-        case 'completed': return '#ECFDF5';
-        case 'active': return '#EFF6FF';
-        case 'error': return '#FEF2F2';
-        default: return '#F9FAFB';
-      }
-    };
-
-    return (
-      <View style={styles.progressStageContainer}>
-        <View style={styles.progressStageLeft}>
-          <View style={[styles.progressStageIcon, { backgroundColor: getBackgroundColor(), borderColor: getStageColor() }]}>
-            {item.status === 'active' ? (
-              <ActivityIndicator size={16} color={getStageColor()} />
-            ) : (
-              <IconComponent size={16} color={getStageColor()} strokeWidth={2} />
-            )}
-          </View>
-          {!isLast && (
-            <View style={[styles.progressStageLine, { backgroundColor: item.status === 'completed' ? '#10B981' : '#E5E7EB' }]} />
-          )}
-        </View>
-        
-        <View style={styles.progressStageContent}>
-          <Text style={[styles.progressStageTitle, { color: getStageColor() }]}>
-            {item.title}
-          </Text>
-          <Text style={styles.progressStageDescription}>
-            {item.description}
-          </Text>
-        </View>
-      </View>
-    );
-  };
-
-  const renderItineraryItem = ({ item, index }: { item: ItineraryItem; index: number }) => {
-    const isLast = index === itinerary.length - 1;
-    
-    return (
-      <View style={styles.timelineContainer}>
-        <View style={styles.timelineLeft}>
-          <View style={styles.timelineNumber}>
-            <Text style={styles.timelineNumberText}>{item.order}</Text>
-          </View>
-          {!isLast && <View style={styles.timelineLine} />}
-        </View>
-        
-        <View style={styles.itineraryCard}>
-          <View style={styles.cardHeader}>
-            <View style={styles.cardTitleContainer}>
-              <MapPin size={16} color="#3B82F6" strokeWidth={2} />
-              <Text style={styles.cardTitle}>{item.place}</Text>
-            </View>
-            <View style={styles.timeContainer}>
-              <Clock size={14} color="#64748B" strokeWidth={2} />
-              <Text style={styles.timeText}>{item.duration_minutes}min</Text>
-            </View>
-          </View>
-          
-          
-          {item.notes && (
-            <View style={styles.notesContainer}>
-              <Text style={styles.notesLabel}>Notes:</Text>
-              <Text style={styles.notesText}>{item.notes}</Text>
-            </View>
-          )}
-        </View>
-      </View>
-    );
-  };
-
-  const renderEmptyState = () => (
-    <View style={styles.emptyState}>
-      <MapPin size={64} color="#CBD5E1" strokeWidth={1.5} />
-      <Text style={styles.emptyTitle}>No Itinerary Yet</Text>
-      <Text style={styles.emptySubtitle}>
-        Enter a TikTok or Instagram URL and city name to generate your personalized travel itinerary
-      </Text>
-    </View>
+  // Búsqueda
+  const filteredTrips = trips.filter(t =>
+    t.name.toLowerCase().includes(search.toLowerCase()) ||
+    t.country.toLowerCase().includes(search.toLowerCase())
   );
 
+  const renderItem = ({ item }: { item: Trip }) => (
+    <TouchableOpacity
+      style={styles.card}
+      onPress={() =>
+        router.push({
+          pathname: "/(main)/trip/[tripId]",
+          params: {
+            tripId: item.trip_id,
+            name: item.name,
+            country: item.country,
+          }
+        })
+      }
+      activeOpacity={0.85}
+    >
+      <View style={styles.cardHeader}>
+        <CountryFlag
+          isoCode={getCountryIso(item.country)}
+          size={15}
+          style={{ marginRight: 8, borderRadius: 4 }}
+        />
+        <Text style={styles.cardTitle}>{item.name}</Text>
+      </View>
+
+      <View style={styles.chipRow}>
+        <View style={styles.countryChip}>
+          <Ionicons name="flag-outline" size={14} color="#2563eb" style={{ marginRight: 8 }} />
+          <Text style={styles.countryText}>{item.country}</Text>
+        </View>
+      </View>
+
+      <View style={styles.cardFooter}>
+        <View style={styles.stopsBadge}>
+          <Ionicons name="walk-outline" size={14} color="#64748B" />
+          <Text style={styles.stopsText}>{item.stops_count} lugares</Text>
+        </View>
+        {item.created_at && (
+          <Text style={styles.createdAt}>
+            · {new Date(item.created_at).toLocaleDateString()}
+          </Text>
+        )}
+      </View>
+    </TouchableOpacity>
+  );
+
+  const getCountryIso = (name: string) => {
+    // Busca el código ISO a partir del nombre en español
+    return countries.getAlpha2Code(name, "es") || "UN";
+  };
+
+  if (authLoading || loading) {
+    return (
+      <View style={styles.loader}>
+        <ActivityIndicator size="large" color="#14B8A6" />
+      </View>
+    );
+  }
+
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={styles.container}>
+      {/* Header */}
       <LinearGradient
-        colors={['#3B82F6', '#1E40AF']}
-        style={styles.header}
+        colors={['#34d399', '#2563eb']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.headerBg}
       >
-        <Text style={styles.headerTitle}>Itinerary Generator</Text>
-        <Text style={styles.headerSubtitle}>
-          Create your perfect travel plan from social media inspiration
+        <Text style={styles.greeting}>
+          ¡Hola {profile ? capitalize(profile.username) : 'viajero'}!
         </Text>
+        <Text style={styles.subtitle}>
+          ¿Listo para tu próxima aventura?
+        </Text>
+        <View style={styles.statsRow}>
+          <View style={styles.statCard}>
+            <View style={styles.iconCircle}>
+              <Ionicons name="airplane-outline" size={22} color="#fff" />
+            </View>
+            <Text style={styles.statNumber}>{trips.length}</Text>
+            <Text style={styles.statLabel}>Viajes</Text>
+          </View>
+          <View style={styles.statCard}>
+            <View style={styles.iconCircle}>
+              <Ionicons name="location-outline" size={22} color="#fff" />
+            </View>
+            <Text style={styles.statNumber}>{uniqueCountries.length}</Text>
+            <Text style={styles.statLabel}>Países</Text>
+          </View>
+          <View style={styles.statCard}>
+            <View style={styles.iconCircle}>
+              <Ionicons name="walk-outline" size={22} color="#fff" />
+            </View>
+            <Text style={styles.statNumber}>{totalStops}</Text>
+            <Text style={styles.statLabel}>Paradas</Text>
+          </View>
+        </View>
       </LinearGradient>
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        <View style={styles.formContainer}>
-          <View style={styles.inputContainer}>
-            <Text style={styles.label}>Social Media URL</Text>
-            <View style={[styles.inputWrapper, urlError && styles.inputError]}>
-              <TextInput
-                style={styles.input}
-                placeholder="Enter TikTok or Instagram URL"
-                value={url}
-                onChangeText={(text) => {
-                  setUrl(text);
-                  if (urlError) setUrlError(null);
-                }}
-                autoCapitalize="none"
-                keyboardType="url"
-                autoCorrect={false}
-                placeholderTextColor="#9CA3AF"
-              />
-            </View>
-            {urlError && (
-              <View style={styles.errorContainer}>
-                <AlertCircle size={14} color="#EF4444" strokeWidth={2} />
-                <Text style={styles.errorText}>{urlError}</Text>
-              </View>
-            )}
-          </View>
+      <SafeAreaView style={{ flex: 1 }}>
+        {/* Búsqueda */}
+        {trips.length > 0 && (
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Buscar viaje o país..."
+            placeholderTextColor="#94A3B8"
+            value={search}
+            onChangeText={setSearch}
+          />
+        )}
 
-          <View style={styles.inputContainer}>
-            <Text style={styles.label}>Destination City</Text>
-            <View style={[styles.inputWrapper, cityError && styles.inputError]}>
-              <TextInput
-                style={styles.input}
-                placeholder="Enter city name"
-                value={city}
-                onChangeText={(text) => {
-                  setCity(text);
-                  if (cityError) setCityError(null);
-                }}
-                autoCapitalize="words"
-                placeholderTextColor="#9CA3AF"
-              />
-            </View>
-            {cityError && (
-              <View style={styles.errorContainer}>
-                <AlertCircle size={14} color="#EF4444" strokeWidth={2} />
-                <Text style={styles.errorText}>{cityError}</Text>
-              </View>
-            )}
-          </View>
-
-          <TouchableOpacity
-            style={[styles.generateButton, loading && styles.generateButtonDisabled]}
-            onPress={generateItinerary}
-            disabled={loading}
-          >
-            <LinearGradient
-              colors={loading ? ['#9CA3AF', '#6B7280'] : ['#3B82F6', '#1E40AF']}
-              style={styles.generateButtonGradient}
+        {/* Empty State */}
+        {trips.length === 0 ? (
+          <View style={styles.emptyState}>
+            <Ionicons name="airplane-outline" size={64} color="#2563eb" style={{ marginBottom: 16 }} />
+            <Text style={styles.emptyTitle}>
+              ¡Todavía no creaste ningún viaje!
+            </Text>
+            <TouchableOpacity
+              style={styles.emptyButton}
+              onPress={() => router.push('/(main)/new-trip')}
             >
-              {loading ? (
-                <ActivityIndicator size={20} color="#FFFFFF" />
-              ) : (
-                <Send size={20} color="#FFFFFF" strokeWidth={2} />
-              )}
-              <Text style={styles.generateButtonText}>
-                {loading ? 'Generating...' : 'Generate Itinerary'}
-              </Text>
-            </LinearGradient>
-          </TouchableOpacity>
-        </View>
-
-        {error && (
-          <View style={styles.globalErrorContainer}>
-            <AlertCircle size={20} color="#EF4444" strokeWidth={2} />
-            <Text style={styles.globalErrorText}>{error}</Text>
+              <Text style={styles.emptyButtonText}>Crear mi primer viaje</Text>
+            </TouchableOpacity>
           </View>
+        ) : (
+          <FlatList
+            data={filteredTrips}
+            keyExtractor={item => item.trip_id}
+            renderItem={renderItem}
+            contentContainerStyle={styles.list}
+            showsVerticalScrollIndicator={false}
+          />
         )}
+      </SafeAreaView>
 
-        {/* Progress Stages */}
-        {loading && (
-          <View style={styles.progressContainer}>
-            <Text style={styles.progressTitle}>Generando tu itinerario...</Text>
-            <FlatList
-              data={progressStages}
-              keyExtractor={(item) => item.id}
-              renderItem={renderProgressStage}
-              scrollEnabled={false}
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={styles.progressList}
-            />
-          </View>
-        )}
-
-        <View style={styles.resultsContainer}>
-          {!loading && itinerary.length > 0 ? (
-            <>
-              <View style={styles.resultsHeader}>
-                <CheckCircle size={20} color="#10B981" strokeWidth={2} />
-                <Text style={styles.resultsTitle}>Your Itinerary</Text>
-              </View>
-              <FlatList
-                data={itinerary}
-                keyExtractor={(item) => item.order.toString()}
-                renderItem={renderItineraryItem}
-                scrollEnabled={false}
-                showsVerticalScrollIndicator={false}
-                contentContainerStyle={styles.itineraryList}
-              />
-              {routeLink && (
-                <TouchableOpacity
-                  style={styles.openMapsButton}
-                  onPress={() => Linking.openURL(routeLink)}
-                >
-                  <Text style={styles.openMapsText}>Abrir en Google Maps</Text>
-                </TouchableOpacity>
-              )}
-
-            </>
-          ) : !loading && !error && (
-            renderEmptyState()
-          )}
-        </View>
-      </ScrollView>
-    </SafeAreaView>
+      {/* FAB clásico para crear viaje */}
+      <TouchableOpacity
+        style={styles.fab}
+        onPress={() => router.push('/(main)/new-trip')}
+        activeOpacity={0.7}
+      >
+        <Ionicons name="add" size={38} color="#fff" />
+      </TouchableOpacity>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F8FAFC',
+  container: { flex: 1, backgroundColor: '#F8FAFC' },
+  loader: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+
+  headerBg: {
+    paddingTop: 65,
+    paddingBottom: 20,
+    paddingHorizontal: 20,
+    borderBottomLeftRadius: 32,
+    borderBottomRightRadius: 32,
   },
-  header: {
-    paddingHorizontal: 24,
-    paddingVertical: 32,
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
-  },
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: '#FFFFFF',
-    marginBottom: 8,
-  },
-  headerSubtitle: {
-    fontSize: 16,
-    color: '#E0E7FF',
-    opacity: 0.9,
-  },
-  content: {
-    flex: 1,
-  },
-  formContainer: {
-    padding: 24,
-    backgroundColor: '#FFFFFF',
-    margin: 16,
-    borderRadius: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  inputContainer: {
-    marginBottom: 24,
-  },
-  label: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1F2937',
-    marginBottom: 8,
-  },
-  inputWrapper: {
-    borderWidth: 1.5,
-    borderColor: '#D1D5DB',
-    borderRadius: 12,
-    backgroundColor: '#FFFFFF',
-  },
-  inputError: {
-    borderColor: '#EF4444',
-  },
-  input: {
-    paddingHorizontal: 16,
-    paddingVertical: 16,
-    fontSize: 16,
-    color: '#1F2937',
-  },
-  errorContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  errorText: {
-    fontSize: 14,
-    color: '#EF4444',
-    marginLeft: 6,
-  },
-  generateButton: {
-    borderRadius: 12,
-    overflow: 'hidden',
-    marginTop: 8,
-  },
-  generateButtonDisabled: {
-    opacity: 0.7,
-  },
-  generateButtonGradient: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-  },
-  generateButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#FFFFFF',
-    marginLeft: 8,
-  },
-  globalErrorContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FEF2F2',
-    borderColor: '#FECACA',
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 16,
-    margin: 16,
-    marginTop: 0,
-  },
-  globalErrorText: {
-    fontSize: 14,
-    color: '#DC2626',
-    marginLeft: 8,
-    flex: 1,
-  },
-  progressContainer: {
-    backgroundColor: '#FFFFFF',
-    margin: 16,
-    marginTop: 0,
-    borderRadius: 16,
-    padding: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  progressTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1F2937',
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  progressList: {
-    paddingHorizontal: 8,
-  },
-  progressStageContainer: {
-    flexDirection: 'row',
-    marginBottom: 20,
-  },
-  progressStageLeft: {
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  progressStageIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    borderWidth: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 1,
-  },
-  progressStageLine: {
-    width: 2,
-    flex: 1,
-    marginTop: 8,
-  },
-  progressStageContent: {
-    flex: 1,
-    paddingTop: 4,
-  },
-  progressStageTitle: {
-    fontSize: 16,
-    fontWeight: '600',
+  greeting: {
+    color: '#fff',
+    fontSize: 26,
+    fontWeight: 'bold',
     marginBottom: 4,
   },
-  progressStageDescription: {
-    fontSize: 14,
-    color: '#64748B',
-    lineHeight: 20,
-  },
-  resultsContainer: {
-    paddingHorizontal: 16,
-    paddingBottom: 32,
-  },
-  resultsHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  subtitle: {
+    color: '#e0e7ef',
+    fontSize: 15,
     marginBottom: 24,
-    paddingHorizontal: 8,
   },
-  resultsTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1F2937',
-    marginLeft: 8,
-  },
-  emptyState: {
-    alignItems: 'center',
-    paddingVertical: 64,
-    paddingHorizontal: 32,
-  },
-  emptyTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: '#64748B',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  emptySubtitle: {
-    fontSize: 16,
-    color: '#9CA3AF',
-    textAlign: 'center',
-    lineHeight: 24,
-  },
-  itineraryList: {
-    paddingHorizontal: 8,
-  },
-  timelineContainer: {
+  statsRow: {
     flexDirection: 'row',
-    marginBottom: 16,
+    justifyContent: 'space-between',
   },
-  timelineLeft: {
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  timelineNumber: {
-    width: 32,
-    height: 32,
+  statCard: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.08)', // transparencia
     borderRadius: 16,
-    backgroundColor: '#3B82F6',
+    alignItems: 'center',
+    marginHorizontal: 6,
+    paddingVertical: 18,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.25)', // borde sutil
+  },
+  iconCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(255,255,255,0.18)', // círculo translúcido
     alignItems: 'center',
     justifyContent: 'center',
+    marginBottom: 10,
+  },
+  statNumber: {
+    fontSize: 32,
+    fontWeight: '900',
+    color: '#fff',
+    marginBottom: 2,
+  },
+  statLabel: {
+    fontSize: 14,
+    color: '#e0e7ef',
+    fontWeight: '600',
+    marginTop: 2,
+  },
+
+  header: {
+    paddingHorizontal: 24,
+    paddingBottom: 40,
+    borderBottomLeftRadius: 32,
+    borderBottomRightRadius: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     zIndex: 1,
   },
-  timelineNumberText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
-  timelineLine: {
-    width: 2,
-    flex: 1,
-    backgroundColor: '#E5E7EB',
-    marginTop: 8,
-  },
-  itineraryCard: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+  headerTitle: { fontSize: 35, fontWeight: '700', color: '#FFFFFF' },
+
+  list: { padding: 16, paddingBottom: 120 },
+
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    padding: 20,
+    marginBottom: 16,
+    shadowColor: '#2563eb',
+    shadowOpacity: 0.07,
+    shadowRadius: 8,
     elevation: 2,
+    borderWidth: 1,
+    borderColor: '#E0E7EF',
   },
   cardHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 8,
-  },
-  cardTitleContainer: {
-    flexDirection: 'row',
     alignItems: 'center',
-    flex: 1,
-    marginRight: 12,
+    marginBottom: 10,
   },
   cardTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1F2937',
-    marginLeft: 8,
-    flex: 1,
+    fontSize: 19,
+    fontWeight: '700',
+    color: '#1e293b',
+    letterSpacing: 0.2,
   },
-  timeContainer: {
+  chipRow: {
+    flexDirection: 'row',
+    marginBottom: 12,
+  },
+  countryChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EEF2FF',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    alignSelf: 'flex-start',
+  },
+  countryText: {
+    color: '#2563eb',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  cardFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  stopsBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#F1F5F9',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
     borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
   },
-  timeText: {
-    fontSize: 12,
-    color: '#64748B',
+  stopsText: {
+    marginLeft: 5,
+    fontSize: 13,
+    color: '#334155',
     fontWeight: '500',
-    marginLeft: 4,
   },
-  startTime: {
-    fontSize: 14,
+  createdAt: {
+    marginLeft: 10,
     color: '#64748B',
-    marginBottom: 8,
+    fontSize: 12,
   },
-  notesContainer: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 8,
-    padding: 12,
-    marginTop: 8,
+  fab: {
+    position: 'absolute',
+    bottom: 32,
+    right: 32,
+    backgroundColor: '#2563eb',
+    borderRadius: 32,
+    width: 64,
+    height: 64,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#2563eb',
+    shadowOpacity: 0.18,
+    shadowRadius: 8,
+    elevation: 4,
+    zIndex: 10,
   },
-  notesLabel: {
-    fontSize: 14,
+  emptyState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 60,
+  },
+  emptyTitle: {
+    fontSize: 20,
+    color: '#64748B',
     fontWeight: '600',
-    color: '#374151',
-    marginBottom: 4,
+    marginBottom: 12,
+    textAlign: 'center',
   },
-  notesText: {
-    fontSize: 14,
-    color: '#6B7280',
-    lineHeight: 20,
+  emptyButton: {
+    backgroundColor: '#2563eb',
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 36,
+    marginTop: 10,
+    shadowColor: '#2563eb',
+    shadowOpacity: 0.13,
+    shadowRadius: 8,
+    elevation: 2,
   },
-  openMapsButton: {
-  marginTop: 16,
-  padding: 12,
-  backgroundColor: '#3B82F6',
-  borderRadius: 8,
-  alignItems: 'center',
-},
-openMapsText: {
-  color: '#FFF',
-  fontWeight: '600',
-},
+  emptyButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 16,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: 18,
+    marginBottom: 6,
+  },
+  summaryItem: {
+    alignItems: 'center',
+  },
+  summaryValue: {
+    fontWeight: '700',
+    color: '#2563eb',
+    fontSize: 24,
+  },
+  summaryLabel: {
+    color: '#64748B',
+    fontSize: 12,
+  },
+  searchInput: {
+    backgroundColor: '#EEF2FF',
+    borderRadius: 10,
+    padding: 10,
+    marginHorizontal: 16,
+    fontSize: 15,
+    color: '#334155',
+    marginTop: -30,
+  },
 });

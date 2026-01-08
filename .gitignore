@@ -2,7 +2,13 @@
 backend/.venv/
 backend/__pycache__/
 *.pyc
+backend/.env
 
 # Expo / Node
 mobile/travel-reel-app/node_modules/
 mobile/travel-reel-app/.expo/
+node_modules/
+.expo/
+
+# OS
+.DS_Store

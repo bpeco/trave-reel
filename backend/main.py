@@ -1,17 +1,14 @@
 import os
-import sqlite3
 import asyncio
 import logging
-from tempfile import TemporaryDirectory
 from typing import List, Tuple, Optional
 from urllib.parse import quote, quote_plus
-
+import json
 import httpx
 import yt_dlp
-from moviepy.video.io.VideoFileClip import VideoFileClip
 import openai
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Path, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from langchain.chat_models import ChatOpenAI
@@ -19,53 +16,33 @@ from langchain.prompts import SystemMessagePromptTemplate, ChatPromptTemplate
 from langchain.chains import LLMChain
 from langchain.output_parsers import PydanticOutputParser
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+from datetime import datetime
+#from postgrest import APIError
+from utils import *
 
-# ─── Configuración de logging ─────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
-logger = logging.getLogger(__name__)
 
-# ─── Configuración de entorno ─────────────────────────────────────────────────
+# === Supabase client ===
+from supabase import create_client, Client
+from supabase.lib.client_options import ClientOptions
+
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 GMAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-if not GMAPS_API_KEY:
-    logger.error("Missing GOOGLE_MAPS_API_KEY in environment")
-    raise RuntimeError("Missing GOOGLE_MAPS_API_KEY in environment")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-logger.info("Starting TravelReel Itinerary API application")
+if not all([GMAPS_API_KEY, SUPABASE_URL, SUPABASE_KEY]):
+    logging.error("Falta alguna de las variables: GOOGLE_MAPS_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY")
+    raise RuntimeError("Env vars missing")
 
-# ─── Base de datos de caché ───────────────────────────────────────────────────
-DB_PATH = os.getenv("GEOCODE_DB", "geocode_cache.db")
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-conn.execute(
-    """
-    CREATE TABLE IF NOT EXISTS geocode_cache (
-        address TEXT PRIMARY KEY,
-        lat REAL,
-        lng REAL,
-        nav_lat REAL,
-        nav_lng REAL,
-        place_id TEXT,
-        restricted_modes TEXT
-    )"""
-)
-conn.execute(
-    """
-    CREATE TABLE IF NOT EXISTS itinerary_cache (
-        video_url TEXT,
-        city TEXT,
-        itinerary_json TEXT,
-        route_link TEXT,
-        PRIMARY KEY(video_url, city)
-    )"""
-)
-conn.commit()
-logger.info(f"Database initialized at {DB_PATH}")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, ClientOptions().replace(schema="travel-reel"))
 
-# ─── Modelos Pydantic ──────────────────────────────────────────────────────────
+logger = logging.getLogger("uvicorn")
+logger.setLevel(logging.INFO)
+logger.info("Starting TravelReel Itinerary API (Supabase)")
+
+# === Pydantic models ===
+
 class ItineraryRequest(BaseModel):
     url: str
     city: str
@@ -84,204 +61,377 @@ class ItineraryResponse(BaseModel):
     ordered: List[ItineraryItem]
     route_link: str
 
-# ─── LangChain Parser y Chain ─────────────────────────────────────────────────
+class ItineraryCreateResponse(ItineraryResponse):
+    itinerary_id: str
+
+class LinkTripRequest(BaseModel):
+    trip_id: str
+
+class ItineraryListItem(BaseModel):
+    itinerary_id: str
+    itinerary_date: datetime
+    description: str
+    count_stops: int
+    avg_time: int
+    categories: List[str] = Field(default_factory=list)
+
+
+class TripSummary(BaseModel):
+    trip_id: str
+    name: str
+    country: str
+    stops_count: int
+
+
+class TripStats(BaseModel):
+    itineraries_count: int
+    stops_count: int
+
+
+class detectedCountry(BaseModel):
+    continent: Optional[str]
+    country: Optional[str]
+
+# === LangChain setup ===
 parser = PydanticOutputParser(pydantic_object=DayItinerary)
-system_msg = SystemMessagePromptTemplate.from_template(
+itinerary_system_msg = SystemMessagePromptTemplate.from_template(
     "Eres un asistente que genera itinerarios de un día en una ciudad específica.\n"
     "Genera **solo** un JSON que cumpla este esquema:\n{format_instructions}\n"
     "Transcripción de audio:\n'''{transcript}'''\n"
     "Ciudad: {city}"
 )
-prompt = ChatPromptTemplate.from_messages([system_msg])
+prompt = ChatPromptTemplate.from_messages([itinerary_system_msg])
+
+country_detection_parser = PydanticOutputParser(pydantic_object=detectedCountry)
+detect_country_system_msg = SystemMessagePromptTemplate.from_template(
+    "Tu tarea es deducir el país y el continente a partir del nombre de un viaje, solo si éste hace referencia a un lugar geográfico.\n"
+    "Reglas:\n"
+    "- El continente debe ser uno de: 'América', 'Europa', 'Asia', 'África', 'Oceanía'.\n"
+    "- El país debe devolverse en código ISO 3166-1 alpha-2 (por ejemplo, 'US', 'FR').\n"
+    "- Si el nombre del viaje no contiene ninguna ciudad, país o lugar reconocible geográficamente, responde con null en ambos campos.\n"
+    "- No infieras por comidas, actividades o palabras culturales: solo si hay evidencia directa de un lugar geográfico.\n"
+    "- Devuelve solo un JSON con el siguiente formato:\n"
+    "{format_output}\n\n\n"
+    "Nombre del viaje: {trip_name}"
+)
+detect_country_prompt = ChatPromptTemplate.from_messages([detect_country_system_msg])
+
+
+
+
+
 llm = ChatOpenAI(model_name="o4-mini", temperature=1)
 chain = LLMChain(llm=llm, prompt=prompt)
+detect_country_chain = LLMChain(llm=llm, prompt=detect_country_prompt)
 
-# ─── FastAPI App ──────────────────────────────────────────────────────────────
+# === FastAPI app ===
 app = FastAPI(title="TravelReel Itinerary API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
-logger.info("FastAPI configured with CORS")
-
-# ─── Funciones auxiliares ──────────────────────────────────────────────────────
-async def geocode_place(address: str) -> Tuple[float, float, str]:
-    logger.info(f"Geocoding address: {address}")
-    cur = conn.execute(
-        "SELECT nav_lat, nav_lng, place_id FROM geocode_cache WHERE address = ?",
-        (address,),
-    )
-    row = cur.fetchone()
-    if row:
-        nav_lat, nav_lng, pid = row
-        logger.info(f"Cache hit for address: {address} (place_id={pid})")
-        return nav_lat, nav_lng, pid
-
-    logger.info(f"Cache miss; calling Geocoding API for: {address}")
-    url = (
-        f"https://maps.googleapis.com/maps/api/geocode/json?address={quote(address)}"
-        f"&key={GMAPS_API_KEY}"
-    )
-    async with httpx.AsyncClient() as client:
-        res = await client.get(url)
-    data = res.json()
-    if data.get("status") != "OK" or not data.get("results"):
-        logger.error(f"Geocoding failed for {address}")
-        raise ValueError(f"Geocoding failed for {address}")
-    result = data["results"][0]
-    geo = result.get("geometry", {}).get("location", {})
-    place_id = result.get("place_id")
-    navs = result.get("navigation_points", [])
-    valid = [p for p in navs if "WALK" not in p.get("restricted_travel_modes", [])]
-    if valid:
-        loc = valid[0]["location"]
-        nav_lat, nav_lng = loc.get("latitude") or loc.get("lat"), loc.get("longitude") or loc.get("lng")
-        logger.info(f"Using navigation_point for {address}: {(nav_lat, nav_lng)}")
-    else:
-        nav_lat, nav_lng = geo.get("lat"), geo.get("lng")
-        logger.info(f"Using geometry.location for {address}: {(nav_lat, nav_lng)}")
-    restricted_list = []
-    for nav in navs:
-        restricted_list.extend(nav.get("restricted_travel_modes", []))
-    restricted = ",".join(restricted_list)
-    conn.execute(
-        "INSERT OR REPLACE INTO geocode_cache(address, lat, lng, nav_lat, nav_lng, place_id, restricted_modes) VALUES(?,?,?,?,?,?,?)",
-        (
-            address,
-            geo.get("lat"),
-            geo.get("lng"),
-            nav_lat,
-            nav_lng,
-            place_id,
-            restricted,
-        ),
-    )
-    conn.commit()
-    logger.info(f"Geocoding result cached for {address} (place_id={place_id})")
-    return nav_lat, nav_lng, place_id
-
-async def geocode_places(places: List[str], city: str) -> List[Tuple[float, float, str]]:
-    logger.info(f"Starting parallel geocoding for {len(places)} places in {city}")
-    tasks = [geocode_place(f"{p}, {city}") for p in places]
-    results = await asyncio.gather(*tasks)
-    logger.info(f"Geocoding completed: {results}")
-    return results
 
 
-def solve_tsp(points: List[Tuple[float, float]]) -> List[int]:
-    logger.info("Solving TSP with OR-Tools")
-    n = len(points)
-    matrix = [[0]*n for _ in range(n)]
-    for i in range(n):
-        for j in range(n):
-            matrix[i][j] = int(((points[i][0]-points[j][0])**2 + (points[i][1]-points[j][1])**2)**0.5 * 100000)
-    manager = pywrapcp.RoutingIndexManager(n, 1, 0)
-    routing = pywrapcp.RoutingModel(manager)
-    def dist_cb(from_idx, to_idx):
-        return matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)]
-    idx = routing.RegisterTransitCallback(dist_cb)
-    routing.SetArcCostEvaluatorOfAllVehicles(idx)
-    params = pywrapcp.DefaultRoutingSearchParameters()
-    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    sol = routing.SolveWithParameters(params)
-    route = []
-    node = routing.Start(0)
-    while not routing.IsEnd(node):
-        route.append(manager.IndexToNode(node))
-        node = sol.Value(routing.NextVar(node))
-    route.append(manager.IndexToNode(node))
-    logger.info(f"TSP solution route: {route}")
-    # drop the return to depot
-    return route[:-1]
-
-
-def build_maps_url(place_ids: List[str], labels: List[str]) -> str:
-    logger.info("Building Google Maps URL with place_ids and labels")
-    origin_pid = place_ids[0]
-    origin_label = labels[0]
-    dest_pid = place_ids[-1]
-    dest_label = labels[-1]
-    params = [
-        "api=1",
-        f"origin_place_id={origin_pid}",
-        f"origin={quote_plus(origin_label)}",
-        f"destination_place_id={dest_pid}",
-        f"destination={quote_plus(dest_label)}",
-        "travelmode=walking"
-    ]
-    if len(place_ids) > 2:
-        wp_names = "|".join(quote_plus(lbl) for lbl in labels[1:-1])
-        wp_ids = "|".join(place_ids[1:-1])
-        params.append(f"waypoints={wp_names}")
-        params.append(f"waypoint_place_ids={wp_ids}")
-    url = "https://www.google.com/maps/dir/?" + "&".join(params)
-    logger.info(f"Maps URL: {url}")
-    return url
-
-@app.post("/itinerary", response_model=ItineraryResponse)
-async def create_itinerary(req: ItineraryRequest):
+# 1) Crear + persistir todo & vincular al viaje
+@app.post(
+    "/api/itineraries",
+    response_model=ItineraryCreateResponse,
+    summary="Genera un itinerario"
+)
+async def create_itinerary_for_trip(
+    req: ItineraryRequest = Body(...)
+):
     logger.info(f"Received itinerary request for URL {req.url} in city {req.city}")
     try:
-        # cache check
-        cur = conn.execute(
-            "SELECT itinerary_json, route_link FROM itinerary_cache WHERE video_url=? AND city=?",
-            (req.url, req.city),
-        )
-        cached = cur.fetchone()
-        if cached:
-            import json
-            items = json.loads(cached[0])
-            route_link = cached[1]
-            logger.info("Cache hit for itinerary; returning cached result")
-            return ItineraryResponse(ordered=items, route_link=route_link)
-
-        # 1) Download & transcribe
-        logger.info("Downloading video and extracting audio")
-        with TemporaryDirectory() as tmp:
-            video_fp = os.path.join(tmp, "video.mp4")
-            audio_fp = os.path.join(tmp, "audio.wav")
-            yt_dlp.YoutubeDL({"format":"mp4","outtmpl":video_fp,"quiet":True}).download([req.url])
-            VideoFileClip(video_fp).audio.write_audiofile(audio_fp, codec="pcm_s16le")
-            logger.info("Calling Whisper API for transcription")
-            transcript = openai.audio.transcriptions.create(
-                model="whisper-1", file=open(audio_fp, "rb"), response_format="text"
+        
+        # --- 1) Buscar el reel
+        reel = (
+                supabase
+                .table("reels")
+                .select("reel_id")
+                .match({"video_url": req.url})
+                .execute()
             )
+        
+        # --- 2) Si no existe el reel, hay que que ir realizar toda la lógica
+        if not reel.data:
 
-        # 2) Generate itinerary via AI
-        logger.info("Generating itinerary via LangChain")
-        result = chain.invoke({"transcript": transcript, "city": req.city,
-                               "format_instructions": parser.get_format_instructions()})
-        day: DayItinerary = parser.parse(result["text"])
+            # ─── 2.1) Download & extract audio ─────────────────────────────
+            transcript = download_and_transcript(req)
 
-        # 3) Geocode in parallel
-        places = [item.place for item in day.items]
-        geocoded = await geocode_places(places, req.city)
-        # unpack triples
-        lats, lngs, place_ids = zip(*geocoded)
-        coords = list(zip(lats, lngs))
+            # ─── 2.3) Generate itinerary via LangChain ────────────────────
+            result = chain.invoke({
+                "transcript": transcript,
+                "city": req.city,
+                "format_instructions": parser.get_format_instructions()
+            })
 
-        # 4) Solve TSP
-        order = solve_tsp(coords)
-        ordered_items = [day.items[i] for i in order]
-        ordered_place_ids = [place_ids[i] for i in order]
-        ordered_labels = [day.items[i].place for i in order]
+            # -- Parse a DayItinerary y extraemos la lista:
+            day: DayItinerary = parser.parse(result["text"])
+            ordered_items: List[ItineraryItem] = day.items
 
-        # 5) Build Maps URL
-        route_link = build_maps_url(ordered_place_ids, ordered_labels)
+            # ─── 4) Geocode places ──────────────────────────────────────
+            places = [it.place for it in ordered_items]
+            geocoded = await geocode_places(places, req.city)
+            lats, lngs, place_ids = zip(*geocoded)
+            coords = list(zip(lats, lngs))
 
-        # 6) Cache result
-        import json
-        conn.execute(
-            "INSERT OR REPLACE INTO itinerary_cache VALUES(?,?,?,?)",
-            (req.url, req.city, json.dumps([item.dict() for item in ordered_items]), route_link),
-        )
-        conn.commit()
-        logger.info("Itinerary generated and cached successfully")
-        return ItineraryResponse(ordered=ordered_items, route_link=route_link)
+            # ─── 5) Solve TSP ────────────────────────────────────────────
+            route = solve_tsp(coords)
+            ordered_items = [ordered_items[i] for i in route]
+            ordered_place_ids = [place_ids[i] for i in route]
+            ordered_labels = [places[i] for i in route]
+
+            # ─── 6) Build Maps URL ──────────────────────────────────────
+            route_link = build_maps_url(ordered_place_ids, ordered_labels)
+
+            # ─── 7) Persistir en Supabase ───────────────────────────────
+            # --- 7.1) Inserto el reel
+            reel = supabase.table("reels") \
+                        .insert([{
+                            "video_url": req.url,
+                            "city": req.city,
+                            "itinerary_json": json.dumps([i.dict() for i in ordered_items]),
+                            "route_link": route_link
+                        }]) \
+                        .execute()
+            
+            # A pesar de hacer un insert, en reel.data tengo el registro insertado en forma de lista
+            reel_id = reel.data[0]["reel_id"]
+
+            # 7.2) itinerary
+            itinerary = supabase.table("itineraries") \
+                .insert([{
+                    "reel_id": reel_id,
+                    "description": ""
+                }]) \
+                .execute()
+
+            itinerary_id = itinerary.data[0]["itinerary_id"]
+
+
+            # 7.3) stops + stops_by_itinerary
+            for item in ordered_items:
+                stop = (
+                    supabase
+                    .table("stops")
+                    .select("stop_id")
+                    .match({"description": item.place,
+                            "city": req.city})
+                    .execute()
+                )
+
+                if stop.data:
+                    stop_id = stop.data[0]["stop_id"]
+                else:
+                    stop_insert = supabase.table("stops") \
+                        .insert([{
+                            "description": item.place,
+                            "city": req.city,
+                            "original_time": item.order
+                        }]) \
+                        .execute()
+
+                    stop_id = stop_insert.data[0]["stop_id"]
+
+                supabase.table("stops_by_itinerary") \
+                    .insert([{
+                        "itinerary_id": itinerary_id,
+                        "stop_id": stop_id,
+                        "time": item.duration_minutes or 0,
+                        "comments": item.notes or None,
+                        "order": item.order
+                    }]) \
+                    .execute()
+
+            # 7.4) link many-to-many
+            #supabase.table("itineraries_by_trip") \
+            #    .insert([{
+            #        "itinerary_id": itinerary_id,
+            #        "trip_id": trip_id
+            #    }]) \
+            #    .execute()
+
+            # ─── 8) Devolver resultado ──────────────────────────────────
+            return ItineraryCreateResponse(
+                itinerary_id=itinerary_id,
+                ordered=ordered_items,
+                route_link=route_link
+            )
+    
+   # except APIError as e:
+   #     logger.error(f"Supabase API error: {e}")
+   #      raise HTTPException(status_code=500, detail=str(e))
+
     except Exception as e:
         logger.exception("Error processing itinerary request")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Para desarrollo: uvicorn main:app --reload
+# 2) añadir un itinerario existente a otro viaje
+@app.post(
+    "/api/itineraries/{itinerary_id}/trips",
+    status_code=201,
+    summary="Vincula un itinerario ya creado a un nuevo viaje"
+)
+async def add_itinerary_to_trip(
+    itinerary_id: str = Path(...),
+    body: LinkTripRequest = Body(...)
+):
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, ClientOptions().replace(schema="travel-reel"))
+
+    supabase.table("itineraries_by_trip").insert([{
+        "itinerary_id": itinerary_id,
+        "trip_id": body.trip_id
+    }]).execute()
+    return {"message": "Itinerario añadido al viaje"}
+
+# 3) listar itinerarios de un viaje
+@app.get(
+    "/api/trips/{trip_id}/itineraries",
+    response_model=List[ItineraryListItem],
+    summary="Lista los itinerarios asociados a un viaje"
+)
+async def list_itineraries_of_trip(
+    trip_id: str = Path(...)
+):
+    resp = supabase.rpc('list_itineraries_of_trip', {'trip_id_input': trip_id}).execute()
+    
+    logger.info(resp)
+
+    return [
+        ItineraryListItem(
+            itinerary_id=r["itinerary_id"],
+            itinerary_date=r["itinerary_date"],
+            description=r["description"],
+            count_stops=r["count_stops"],
+            avg_time=r["avg_time"],
+            categories=r["categories"]
+
+        )
+        for r in resp.data
+    ]
+
+# 4) detalle de un itinerario
+@app.get(
+    "/api/itineraries/{itinerary_id}",
+    response_model=ItineraryResponse,
+    summary="Obtiene el detalle de un itinerario (stops + route_link)"
+)
+async def get_itinerary_detail(
+    itinerary_id: str = Path(...)
+):
+    # 4.1) stops ordenadas
+    r1 = supabase.table("stops_by_itinerary")\
+        .select("order, time, comments, stops(description, city)")\
+        .eq("itinerary_id", itinerary_id)\
+        .order("order")\
+        .execute()
+    stops_data = r1.data
+    ordered = [
+        ItineraryItem(
+          order=s["order"],
+          place=s["stops"]["description"],
+          duration_minutes=s["time"],
+          notes=s["comments"]
+        )
+        for s in stops_data
+    ]
+
+    # 4.2) route_link desde reels via itineraries
+    r2 = supabase.table("itineraries")\
+        .select("reel_id")\
+        .eq("itinerary_id", itinerary_id)\
+        .single().execute()
+    reel_id = r2.data["reel_id"]
+
+    r3 = supabase.table("reels")\
+        .select("route_link")\
+        .eq("reel_id", reel_id)\
+        .single().execute()
+    route_link = r3.data["route_link"]
+
+    return ItineraryResponse(ordered=ordered, route_link=route_link)
+
+
+
+@app.get(
+    "/api/trips",
+    response_model=List[TripSummary],
+    summary="Lista los viajes con la cantidad de paradas de todos sus itinerarios"
+)
+async def list_trips_with_stops(created_by: str = Query(..., description="ID del usuario que creó los viajes")):
+    try:
+        resp = supabase.rpc("get_trip_summaries_with_stops", {"created_by": created_by}).execute()
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+    return resp.data  # [{ trip_id, name, country, stops_count }]
+    
+@app.get(
+    "/api/trips/{trip_id}/stats",
+    response_model=TripStats,
+    summary="Estadísticas de un viaje: cantidad de itinerarios y paradas"
+)
+async def get_trip_stats(trip_id: str = Path(...)):
+    # 1) Count itineraries
+    it_resp = supabase.table("itineraries_by_trip")\
+        .select("itinerary_id", count="exact")\
+        .eq("trip_id", trip_id)\
+        .execute()
+    itineraries_count = it_resp.count or 0
+
+    # 2) Fetch all itinerary_ids
+    ids = [r["itinerary_id"] for r in supabase.table("itineraries_by_trip")
+                                    .select("itinerary_id")
+                                    .eq("trip_id", trip_id)
+                                    .execute().data]
+    # 3) Count stops
+    if ids:
+        stops_resp = supabase.table("stops_by_itinerary")\
+            .select("stop_id", count="exact")\
+            .in_("itinerary_id", ids)\
+            .execute()
+        stops_count = stops_resp.count or 0
+    else:
+        stops_count = 0
+
+    return TripStats(itineraries_count=itineraries_count, stops_count=stops_count)
+
+
+
+@app.post(
+    "/api/detect-country",
+    response_model=detectedCountry,
+    summary="Detecta el país y continente a partir del nombre del viaje"
+)
+async def detect_country_endpoint(
+    trip_name: str = Body(..., embed=True, description="Nombre del viaje")
+):
+    try:
+        # Invoca la chain de LangChain
+        result = detect_country_chain.invoke({
+            "trip_name": trip_name,
+            "format_output": country_detection_parser.get_format_instructions()
+        })
+        # Parsea la respuesta usando el parser de Pydantic
+        parsed = country_detection_parser.parse(result["text"])
+        return parsed
+    except Exception as e:
+        logger.exception("Error detecting country")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/reels/{reel_id}",
+    summary="Devuelve el JSON y el link de ruta de un reel",
+)
+async def get_reel_detail(
+    reel_id: str = Path(...)
+):
+    r = supabase.table("reels")\
+        .select("itinerary_json, route_link")\
+        .eq("reel_id", reel_id)\
+        .single().execute()
+    if not r.data:
+        raise HTTPException(status_code=404, detail="Reel no encontrado")
+    return r.data
