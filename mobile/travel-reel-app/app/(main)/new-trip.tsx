@@ -68,7 +68,7 @@ const countryList = Object.entries(countries.getNames('es')).map(([code, name]) 
   continent: countryToContinent[code] || 'Otro',
 })).filter(c => KNOWN_COUNTRIES.includes(c.code));
 
-const BACKEND_URL = 'http://192.168.0.18:8080';
+const BACKEND_URL = 'http://192.168.0.14:8000';
 
 export default function NewTripScreen() {
   const router = useRouter();

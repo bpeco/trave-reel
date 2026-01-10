@@ -16,7 +16,7 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import * as Haptics from 'expo-haptics'
 
-const BACKEND_URL = 'http://192.168.0.18:8080';
+const BACKEND_URL = 'http://192.168.0.14:8000';
 
 const formatItineraryDate = (iso: string) =>
   new Date(iso)

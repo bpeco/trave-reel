@@ -35,7 +35,7 @@ if not all([GMAPS_API_KEY, SUPABASE_URL, SUPABASE_KEY]):
     logging.error("Falta alguna de las variables: GOOGLE_MAPS_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY")
     raise RuntimeError("Env vars missing")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, ClientOptions().replace(schema="travel-reel"))
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, ClientOptions().replace(schema="public"))
 
 logger = logging.getLogger("uvicorn")
 logger.setLevel(logging.INFO)
@@ -96,7 +96,15 @@ class detectedCountry(BaseModel):
 parser = PydanticOutputParser(pydantic_object=DayItinerary)
 itinerary_system_msg = SystemMessagePromptTemplate.from_template(
     "Eres un asistente que genera itinerarios de un día en una ciudad específica.\n"
-    "Genera **solo** un JSON que cumpla este esquema:\n{format_instructions}\n"
+    "IMPORTANTE: Para cada lugar, usa el NOMBRE EXACTO mencionado en el video.\n"
+    "- Si se menciona un negocio específico (ej: 'Café Rossi'), usa ese nombre exacto\n"
+    "- Si se menciona un monumento/atracción (ej: 'Torre de Pisa'), usa ese nombre\n"
+    "- Si NO se menciona un nombre específico, usa una descripción clara y geocodificable\n"
+    "  (ej: 'Piazza del Campo' en vez de 'Plaza principal')\n"
+    "- NUNCA uses frases genéricas como 'Restaurante recomendado' o 'Cafetería local'\n"
+    "- Si el audio menciona una categoría sin nombre específico (ej: 'un restaurante'), \n"
+    "  extrae el contexto para identificar el lugar siempre y cuando sea posible. No inventes. (ej: nombre de la calle, zona, descripción)\n\n"
+    "Genera **solo** un JSON que cumpla este esquema:\n{format_instructions}\n\n"
     "Transcripción de audio:\n'''{transcript}'''\n"
     "Ciudad: {city}"
 )
@@ -277,7 +285,7 @@ async def add_itinerary_to_trip(
     itinerary_id: str = Path(...),
     body: LinkTripRequest = Body(...)
 ):
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, ClientOptions().replace(schema="travel-reel"))
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, ClientOptions().replace(schema="public"))
 
     supabase.table("itineraries_by_trip").insert([{
         "itinerary_id": itinerary_id,
@@ -354,18 +362,22 @@ async def get_itinerary_detail(
 
 
 
+
 @app.get(
     "/api/trips",
     response_model=List[TripSummary],
-    summary="Lista los viajes con la cantidad de paradas de todos sus itinerarios"
+    summary="Lista los viajes de un usuario con la cantidad de paradas de todos sus itinerarios"
 )
-async def list_trips_with_stops(created_by: str = Query(..., description="ID del usuario que creó los viajes")):
+async def list_trips_with_stops(
+    created_by: str = Query(..., description="ID del usuario que creó los viajes")
+):
     try:
-        resp = supabase.rpc("get_trip_summaries_with_stops", {"created_by": created_by}).execute()
+        resp = supabase.rpc("get_trip_summaries_with_stops", {"user_id": created_by}).execute()
     except Exception as e:
         raise HTTPException(500, detail=str(e))
 
-    return resp.data  # [{ trip_id, name, country, stops_count }]
+    return resp.data
+
     
 @app.get(
     "/api/trips/{trip_id}/stats",

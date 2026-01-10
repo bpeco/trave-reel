@@ -32,7 +32,7 @@ if not all([GMAPS_API_KEY, SUPABASE_URL, SUPABASE_KEY]):
     logging.error("Falta alguna de las variables: GOOGLE_MAPS_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY")
     raise RuntimeError("Env vars missing")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, ClientOptions().replace(schema="travel-reel"))
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, ClientOptions().replace(schema="public"))
 
 
 

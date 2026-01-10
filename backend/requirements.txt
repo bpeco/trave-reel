@@ -11,3 +11,4 @@ ortools
 fastapi
 httpx
 uvicorn
+supabase

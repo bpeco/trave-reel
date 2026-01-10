@@ -16,7 +16,7 @@ import axios from 'axios';
 import { Ionicons } from '@expo/vector-icons';
 import { Animated } from 'react-native';
 
-const BACKEND_URL = 'http://192.168.0.18:8080';
+const BACKEND_URL = 'http://192.168.0.14:8000';
 
 interface ItineraryItem {
   order: number;

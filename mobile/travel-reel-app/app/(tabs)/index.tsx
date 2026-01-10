@@ -23,7 +23,7 @@ import es from "i18n-iso-countries/langs/es.json";
 countries.registerLocale(es);
 
 const { width } = Dimensions.get('window');
-const BACKEND_URL = 'http://192.168.0.18:8080';
+const BACKEND_URL = 'http://192.168.0.14:8000';
 
 interface Trip {
   trip_id: string;
@@ -49,8 +49,21 @@ export default function TripsScreen() {
     if (!user) return;
     setLoading(true);
     fetch(`${BACKEND_URL}/api/trips?created_by=${user.id}`)
-      .then(res => res.json())
-      .then((data: Trip[]) => setTrips(data))
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        return res.json();
+      })
+      .then((data: Trip[]) => {
+        if (Array.isArray(data)) {
+          setTrips(data);
+        } else {
+          setTrips([]);
+        }
+      })
+      .catch(err => {
+        console.error('Error al cargar viajes:', err);
+        setTrips([]);
+      })
       .finally(() => setLoading(false));
   }, [user]);
 

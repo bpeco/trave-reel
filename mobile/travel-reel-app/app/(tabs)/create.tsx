@@ -22,7 +22,7 @@ import axios from 'axios';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 
-const BACKEND_URL = 'http://192.168.0.18:8080';
+const BACKEND_URL = 'http://192.168.0.14:8000';
 
 
 interface ItineraryItem {
