@@ -1,6 +1,6 @@
 // app/(tabs)/_layout.tsx
 import { Tabs } from 'expo-router'
-import { MapPin, Plus, User } from 'lucide-react-native'
+import { MapPin, Plus, User, Palette } from 'lucide-react-native'
 
 export default function TabLayout() {
   return (
@@ -43,6 +43,13 @@ export default function TabLayout() {
         options={{
           title: 'Perfil',
           tabBarIcon: ({ size, color }) => <User size={size} color={color} strokeWidth={2} />,
+        }}
+      />
+      <Tabs.Screen
+        name="design-system"
+        options={{
+          title: 'Design',
+          tabBarIcon: ({ size, color }) => <Palette size={size} color={color} strokeWidth={2} />,
         }}
       />
     </Tabs>
